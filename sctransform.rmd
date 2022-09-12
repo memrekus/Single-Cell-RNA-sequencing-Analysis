@@ -1,0 +1,331 @@
+---
+title: "sctransform"
+author: "memrekus"
+date: "7/26/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Load the Libraries
+
+
+```{r}
+
+library("TCGAbiolinks")
+library("limma")
+library("edgeR")
+library("glmnet")
+library("factoextra")
+library("FactoMineR")
+library("caret")
+library("SummarizedExperiment")
+library("gplots")
+library("survival")
+library("survminer")
+library("RColorBrewer")
+library("gProfileR")
+library("genefilter")
+library("data.table")
+library("dplyr")
+library("tidyverse")
+library("Rsamtools")
+library("rtracklayer")
+library("AnnotationHub")
+library("Seurat")
+library("sctransform")
+library("umap")
+library("hdf5r")
+library("GEOquery")
+library("Matrix")
+library("crowbar")
+library("ggplot2")
+
+```
+
+
+#Download and manipulate the Data (you can use the link for downloading the scRNAseq data)
+#https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE72056
+
+```{r}
+
+mel<- as.data.frame(read.delim("GSE72056_melanoma_single_cell_revised_v2.txt"))
+
+mel$Cell[23205]<-("MARCHTWO")
+mel$Cell[23640]<-("MARCHONE")
+rownames(mel)<- mel$Cell
+mel$Cell<-NULL
+mel = mel[-c(1,2,3),]
+
+```
+
+
+#Create Seurat Object
+
+
+```{r}
+
+mel <- CreateSeuratObject(counts = mel, project = "MELANOMA", min.cells = 3, min.features = 200)
+
+```
+
+
+#Apply SCTransform
+
+
+```{r}
+
+mel <- PercentageFeatureSet(mel, pattern = "^MT-", col.name = "percent.mt")
+
+VlnPlot(mel, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+FeatureScatter(mel, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
+  geom_smooth(method = 'lm')
+
+mel <- SCTransform(mel, vars.to.regress = "percent.mt", verbose = FALSE)
+
+```
+
+
+#Fit linear models to overdispersed count data. The package can estimate the overdispersion and fit repeated models for matrix input. It is designed to handle large input datasets as they typically occur in single cell RNA-seq experiments.
+
+
+```{r}
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+
+BiocManager::install("glmGamPoi")
+
+mel <- SCTransform(mel, method = "glmGamPoi", vars.to.regress = "percent.mt", verbose = FALSE)
+
+```
+
+
+# determine dimensionality of the data
+
+
+```{r}
+
+ElbowPlot(mel)
+
+```
+
+
+# plot variable features with and without labels
+
+
+```{r}
+
+top10 <- head(VariableFeatures(mel), 10)
+
+plot1 <- VariableFeaturePlot(mel)
+
+LabelPoints(plot = plot1, points = top10, repel = TRUE)
+
+```
+
+
+#PCA & UMAP
+
+
+```{r}
+
+mel <- RunPCA(mel, verbose = FALSE)
+mel <- RunUMAP(mel, dims = 1:30, verbose = FALSE)
+
+mel <- FindNeighbors(mel, dims = 1:30, verbose = FALSE)
+mel <- FindClusters(mel, verbose = FALSE)
+
+DimPlot(mel, label = TRUE) + NoLegend()
+
+PCAPlot(mel)
+
+DimHeatmap(mel)
+
+```
+
+
+#TSNE
+
+
+```{r}
+
+set.seed(123456)
+
+mel <- RunTSNE(mel, perplexity = 130)
+
+TSNEPlot(mel)
+
+```
+
+
+#VLNPlot
+
+
+```{r}
+
+VlnPlot(mel, features = c("CD8A", "GZMK", "CCL5", "S100A4", "ANXA1", "CCR7", "ISG15", "CD3D"),
+    pt.size = 0.2, ncol = 4)
+
+```
+
+
+#FeaturePlot
+
+
+```{r}
+
+FeaturePlot(mel, features = c("CD8A", "GZMK", "CCL5", "S100A4", "ANXA1", "CCR7"), pt.size = 0.2,
+    ncol = 3)
+
+FeaturePlot(mel, features = c("CD3D", "ISG15", "TCL1A", "FCER2", "XCL1", "FCGR3A"), pt.size = 0.2,
+    ncol = 3)
+
+```
+
+
+# find all markers of cluster 1
+
+
+```{r}
+
+cluster1.markers <- FindMarkers(mel, ident.1 = 1, min.pct = 0.25)
+
+head(cluster1.markers, n = 5)
+
+VlnPlot(mel, features = c(row.names(cluster1.markers)[1], row.names(cluster1.markers)[2]))
+
+```
+
+
+# find all markers of cluster 2
+
+
+```{r}
+
+cluster2.markers <- FindMarkers(mel, ident.1 = 2, min.pct = 0.25)
+
+head(cluster2.markers, n = 5)
+
+VlnPlot(mel, features = c(row.names(cluster2.markers)[1], row.names(cluster2.markers)[2]))
+
+```
+
+
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+
+
+```{r}
+
+cluster5.markers <- FindMarkers(mel, ident.1 = 5, ident.2 = c(0, 3), min.pct = 0.25)
+
+head(cluster5.markers, n = 5)
+
+VlnPlot(mel, features = c(row.names(cluster5.markers)[1], row.names(cluster5.markers)[2]))
+
+```
+
+
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+
+
+```{r}
+
+mel.markers <- FindAllMarkers(mel, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+```
+
+```{r}
+
+x <- mel.markers %>% group_by(cluster) %>% top_n(n = 1, wt = avg_log2FC)
+
+FeaturePlot(mel, features = x$gene[1:4])
+
+FeaturePlot(mel, features = x$gene[5:8])
+
+```
+
+```{r}
+
+p <- FeaturePlot(mel, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP", "CD8A"), combine = FALSE)
+p <- lapply(X = p, FUN = function(x) x + 
+                                        theme(plot.title = element_text(size = 8)) +
+                                        theme(axis.title.y = element_text(size = 5)) +
+                                        theme(axis.title.x = element_text(size = 5)) +
+                                        theme(axis.text.y = element_text(size = 5)) +
+                                        theme(axis.text.x = element_text(size = 5)) +
+                                        theme(legend.position = "none")  )
+CombinePlots(plots = p)
+
+```
+
+```{r}
+
+top10 <- mel.markers %>% 
+            group_by(cluster) %>% 
+            top_n(n = 10, wt = avg_log2FC)
+top10
+
+```
+
+```{r}
+
+p2 <- DoHeatmap(mel, features = top10$gene, group.bar.height = 0.01,size=3,combine = FALSE) 
+
+p2 <- lapply(X = p2, FUN = function(x) x + 
+                                        theme(plot.title = element_text(size = 8)) +
+                                        theme(axis.title.y = element_text(size = 5)) +
+                                        theme(axis.title.x = element_text(size = 5)) +
+                                        theme(axis.text.y = element_text(size = 3)) +
+                                        theme(legend.position = "none")  )
+CombinePlots(plots = p2)
+
+```
+
+
+# Assigning cell type identity to clusters
+
+
+```{r}
+
+new.cluster.ids <- c("a", "b", "c", "d", "e", "f", "g", "h","i", "j", "k", "l", "m", "n", "o", "p","r", "s", "t", "u", "v", "y", "z", "x","w", "Platelet")
+
+names(new.cluster.ids) <- levels(mel)
+
+mel <- RenameIdents(mel, new.cluster.ids)
+
+DimPlot(mel, reduction = "pca", label = TRUE, pt.size = 0.5)
+
+```
+
+
+```{r}
+
+mel
+
+DimPlot(mel, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+```
+
+
+#Save & Read
+
+
+```{r}
+
+saveRDS(mel.markers,"mel.markers.Rds")
+
+mel.markers<-readRDS("mel.markers.Rds")
+
+saveRDS(mel,"mel.Rds")
+
+mel<-readRDS("mel.Rds")
+
+sessionInfo()
+
+```
+
+
