@@ -1,0 +1,295 @@
+---
+title: "scRNAseq standard pipeline"
+author: "memrekus"
+date: "7/12/2022"
+output: html_document
+---
+
+
+# script to perform workflow steps to analyze single cell RNA-Seq data
+# data: Single cell RNA-seq analysis of melanoma
+# data source: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE72056  
+
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Load Libraries
+
+
+```{r}
+
+library("TCGAbiolinks")
+library("limma")
+library("edgeR")
+library("glmnet")
+library("factoextra")
+library("FactoMineR")
+library("caret")
+library("SummarizedExperiment")
+library("gplots")
+library("survival")
+library("survminer")
+library("RColorBrewer")
+library("gProfileR")
+library("genefilter")
+library("data.table")
+library("dplyr")
+library("tidyverse")
+library("Rsamtools")
+library("rtracklayer")
+library("AnnotationHub")
+library("Seurat")
+library("sctransform")
+library("umap")
+library("hdf5r")
+library("GEOquery")
+library("Matrix")
+library("crowbar")
+library("ggplot2")
+
+```
+
+
+# Load the MELANOMA dataset
+
+
+```{r}
+
+cts <- as.data.frame(read.delim("GSE72056_melanoma_single_cell_revised_v2.txt"))
+
+#mel.sparse.m <- getGEO("GSE72056")
+
+cts$Cell[23205]<-("MARCHTWO")
+cts$Cell[23640]<-("MARCHONE")
+rownames(cts)<- cts$Cell
+cts$Cell<-NULL
+cts = cts[-c(1,2,3),]
+
+saveRDS(cts,file = "cts.Rds")
+
+cts<-readRDS("cts.Rds")
+
+# cts<- mel.sparse.m[[1]]
+# 
+# pData(cts)
+# 
+# fData(cts)
+# 
+# exprs(cts)
+
+
+```
+
+
+
+# Initialize the Seurat object with the raw (non-normalized data).
+
+
+```{r}
+
+mel.seurat.obj <- CreateSeuratObject(counts = cts, project = "MELANOMA", min.cells = 3, min.features = 200)
+
+str(mel.seurat.obj)
+
+mel.seurat.obj
+
+saveRDS(mel.seurat.obj,"mel.seurat.obj.Rds")
+
+readRDS("mel.seurat.obj.Rds")
+
+```
+
+
+# 1. QC -------
+
+
+```{r}
+
+View(mel.seurat.obj@meta.data)
+
+```
+
+
+# % MT reads
+
+
+```{r}
+
+mel.seurat.obj[["percent.mt"]] <- PercentageFeatureSet(mel.seurat.obj, pattern = "^MT-")
+
+View(mel.seurat.obj@meta.data)
+
+VlnPlot(mel.seurat.obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+FeatureScatter(mel.seurat.obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
+  geom_smooth(method = 'lm')
+
+```
+
+
+# 2. Filtering -----------------
+
+
+```{r}
+
+mel.seurat.obj <- subset(mel.seurat.obj, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & 
+                          percent.mt < 5)
+
+```
+
+
+# 3. Normalize data ----------
+
+
+```{r}
+
+#mel.seurat.obj <- NormalizeData(mel.seurat.obj, normalization.method = "LogNormalize", scale.factor = 10000)
+
+mel.seurat.obj <- NormalizeData(mel.seurat.obj)
+
+str(mel.seurat.obj)
+
+```
+
+
+# 4. Identify highly variable features --------------
+
+
+```{r}
+
+mel.seurat.obj <- FindVariableFeatures(mel.seurat.obj, selection.method = "vst", nfeatures = 2000)
+
+```
+
+
+# Identify the 10 most highly variable genes
+
+
+```{r}
+
+top10 <- head(VariableFeatures(mel.seurat.obj), 10)
+
+```
+
+
+# plot variable features with and without labels
+
+
+```{r}
+
+plot1 <- VariableFeaturePlot(mel.seurat.obj)
+
+LabelPoints(plot = plot1, points = top10, repel = TRUE)
+
+```
+
+
+# 5. Scaling -------------
+
+
+```{r}
+
+all.genes <- rownames(mel.seurat.obj)
+
+mel.seurat.obj <- ScaleData(mel.seurat.obj, features = all.genes)
+
+str(mel.seurat.obj)
+
+```
+
+
+# 6. Perform Linear dimensionality reduction --------------
+
+
+```{r}
+
+mel.seurat.obj <- RunPCA(mel.seurat.obj, features = VariableFeatures(object = mel.seurat.obj))
+
+```
+
+
+# visualize PCA results
+
+
+```{r}
+
+print(mel.seurat.obj[["pca"]], dims = 1:5, nfeatures = 5)
+
+DimHeatmap(mel.seurat.obj, dims = 1, cells = 500, balanced = TRUE)
+
+```
+
+
+# determine dimensionality of the data
+
+
+```{r}
+
+ElbowPlot(mel.seurat.obj)
+
+```
+
+
+# 7. Clustering ------------
+
+
+```{r}
+
+mel.seurat.obj <- FindNeighbors(mel.seurat.obj, dims = 1:15)
+
+```
+
+
+# understanding resolution
+
+
+```{r}
+
+mel.seurat.obj <- FindClusters(mel.seurat.obj, resolution = c(0.1,0.3, 0.5, 0.7, 1))
+
+View(mel.seurat.obj@meta.data)
+
+DimPlot(mel.seurat.obj, group.by = "RNA_snn_res.0.5", label = TRUE)
+
+```
+
+
+# setting identity of clusters
+
+
+```{r}
+
+Idents(mel.seurat.obj)
+
+Idents(mel.seurat.obj) <- "RNA_snn_res.0.1"
+
+Idents(mel.seurat.obj)
+
+```
+
+
+# non-linear dimensionality reduction --------------
+
+
+```{r}
+
+# If you haven't installed UMAP, you can do so via reticulate::py_install(packages ='umap-learn')
+
+mel.seurat.obj <- RunUMAP(mel.seurat.obj, dims = 1:15)
+
+# note that you can set `label = TRUE` or use the LabelClusters function to help label
+
+```
+
+
+# individual clusters
+
+
+```{r}
+
+DimPlot(mel.seurat.obj, reduction = "umap")
+
+```
